@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 import time
 import warnings
+import plotly.express as px
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Quant Portfolio Builder Pro", layout="wide", initial_sidebar_state="expanded")
@@ -25,17 +26,38 @@ risk_propensity = st.sidebar.slider(
     min_value=1, 
     max_value=100, 
     value=50, 
-    help="1% = Conservativo (priorità a Quality e stabilità), 100% = Aggressivo (priorità al Momentum)"
+    help="1% = Conservativo (priorità a Quality), 100% = Aggressivo (priorità al Momentum)"
 )
 
-st.sidebar.subheader("Parametri Kelly")
-col_k1, col_k2 = st.sidebar.columns(2)
-with col_k1:
-    p_win = st.number_input("Probabilità p", min_value=0.1, max_value=0.95, value=0.55, step=0.01)
-with col_k2:
-    payoff_ratio = st.number_input("Payoff Ratio b", min_value=0.5, max_value=10.0, value=1.5, step=0.1)
+st.sidebar.subheader("📊 Selezione Titoli")
+col_min, col_max = st.sidebar.columns(2)
+with col_min:
+    min_stocks = st.number_input("Minimo azioni", min_value=1, max_value=50, value=3)
+with col_max:
+    max_stocks = st.number_input("Massimo azioni", min_value=min_stocks, max_value=50, value=10)
 
-kelly_fraction = st.sidebar.slider("Frazionamento Kelly", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
+num_stocks = st.sidebar.slider("Numero titoli da selezionare", min_stocks, max_stocks, max_stocks, 
+                               help="Numero esatto di titoli nel portafoglio")
+
+st.sidebar.subheader("💰 Budget e Kelly")
+use_kelly = st.sidebar.checkbox("Usa Kelly per limitare l'investimento", value=True,
+                                help="Se attivo, investe solo la % calcolata da Kelly. Se disattivo, investe tutto il budget.")
+
+if use_kelly:
+    st.sidebar.markdown("**Parametri Kelly**")
+    col_k1, col_k2 = st.sidebar.columns(2)
+    with col_k1:
+        p_win = st.number_input("Probabilità p", min_value=0.1, max_value=0.95, value=0.55, step=0.01)
+    with col_k2:
+        payoff_ratio = st.number_input("Payoff Ratio b", min_value=0.5, max_value=10.0, value=1.5, step=0.1)
+    
+    kelly_fraction = st.sidebar.slider("Frazionamento Kelly", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
+    budget_to_use = total_capital
+else:
+    budget_to_use = st.sidebar.number_input("Budget da investire (€)", min_value=1000, value=total_capital, step=1000)
+    kelly_fraction = 1.0
+    p_win = 0.55
+    payoff_ratio = 1.5
 
 st.sidebar.subheader("Pesi Fattori (Base)")
 w_momentum = st.sidebar.slider("Peso Momentum", 0.0, 1.0, 0.4, 0.05)
@@ -43,13 +65,13 @@ w_quality = st.sidebar.slider("Peso Quality (Sharpe)", 0.0, 1.0, 0.35, 0.05)
 w_volatility = st.sidebar.slider("Peso Volatilità (invertita)", 0.0, 1.0, 0.25, 0.05)
 
 lookback_days = st.sidebar.selectbox("Periodo Analisi", [90, 180, 252, 500], index=1)
-top_pct = st.sidebar.slider("Selezione Top %", 1, 20, 10, 1)
-min_stocks = st.sidebar.number_input("Minimo azioni portfolio", min_value=1, max_value=50, value=5)
 
 st.sidebar.subheader("🌍 Universo di Investimento")
 input_method = st.sidebar.radio("Metodo", ["📝 Lista Ticker", "📁 Carica CSV", "🎲 Demo Mode (dati fittizi)"])
 
 tickers_list = []
+uploaded_df = None
+
 if input_method == "📝 Lista Ticker":
     ticker_input = st.sidebar.text_area(
         "Ticker separati da virgola",
@@ -57,12 +79,13 @@ if input_method == "📝 Lista Ticker":
         height=120
     )
     tickers_list = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
+    
 elif input_method == "📁 Carica CSV":
     uploaded_file = st.sidebar.file_uploader("CSV con colonna 'Ticker'", type=['csv'])
     if uploaded_file:
-        df_upload = pd.read_csv(uploaded_file)
-        if 'Ticker' in df_upload.columns:
-            tickers_list = df_upload['Ticker'].dropna().astype(str).str.upper().tolist()
+        uploaded_df = pd.read_csv(uploaded_file)
+        if 'Ticker' in uploaded_df.columns:
+            tickers_list = uploaded_df['Ticker'].dropna().astype(str).str.upper().tolist()
         else:
             st.sidebar.error("Colonna 'Ticker' non trovata!")
 else:
@@ -216,18 +239,6 @@ def zscore_normalize(series):
         return pd.Series(0, index=series.index)
     return (series - mean) / std
 
-def score_stocks(factors, w_mom, w_qual, w_vol):
-    df = factors.copy()
-    df['Z_Momentum'] = zscore_normalize(df['Momentum'])
-    df['Z_Quality'] = zscore_normalize(df['Quality'])
-    df['Z_Volatility'] = zscore_normalize(df['Volatility'])
-    
-    df['Base_Score'] = (w_mom * df['Z_Momentum'] + 
-                        w_qual * df['Z_Quality'] - 
-                        w_vol * df['Z_Volatility'])
-    
-    return df
-
 def calculate_risk_adjusted_allocations(factors, risk_propensity):
     """
     Calcola pesi dinamici basati sulla propensione al rischio.
@@ -244,7 +255,7 @@ def calculate_risk_adjusted_allocations(factors, risk_propensity):
                         (abs(df['Max_Drawdown']) * (1 - R) * 2)
     
     # Evita pesi negativi
-    df['Raw_Weight'] = np.where(df['Alloc_Score'] > 0, df['Alloc_Score'], 0.01)
+    df['Raw_Weight'] = np.maximum(df['Alloc_Score'], 0.01)
     
     return df
 
@@ -302,8 +313,9 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     st.success(f"✅ Dati validi per {len(valid_tickers)} ticker")
     
     if len(valid_tickers) < min_stocks:
-        st.warning(f"⚠️ Solo {len(valid_tickers)} ticker validi. Continuo con demo mode...")
-        if len(valid_tickers) < 2:
+        st.warning(f"⚠️ Solo {len(valid_tickers)} ticker validi. Riduco selezione.")
+        num_stocks = min(num_stocks, len(valid_tickers))
+        if num_stocks < 2:
             st.error("Dati insufficienti. Usa esclusivamente la Demo Mode.")
             st.stop()
     
@@ -311,24 +323,25 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     with st.spinner("Calcolo Momentum, Quality e Volatilità..."):
         factors = calculate_factors(close_prices)
-        factors_with_scores = score_stocks(factors, w_momentum, w_quality, w_volatility)
         
         # Applica Risk-Adjusted Allocation
-        factors_with_weights = calculate_risk_adjusted_allocations(factors, risk_propensity)
+        factors = calculate_risk_adjusted_allocations(factors, risk_propensity)
         
-        # Unisci i due dataframe
-        for col in ['Base_Score', 'Alloc_Score', 'Raw_Weight']:
-            if col in factors_with_weights.columns:
-                factors_with_scores[col] = factors_with_weights[col]
+        # Calcola anche base score per riferimento
+        factors['Z_Momentum'] = zscore_normalize(factors['Momentum'])
+        factors['Z_Quality'] = zscore_normalize(factors['Quality'])
+        factors['Z_Volatility'] = zscore_normalize(factors['Volatility'])
+        factors['Base_Score'] = (w_momentum * factors['Z_Momentum'] + 
+                                  w_quality * factors['Z_Quality'] - 
+                                  w_volatility * factors['Z_Volatility'])
     
-    # Seleziona top ticker basati su Alloc_Score (Risk-Adjusted)
-    n_select = max(min_stocks, min(len(factors_with_scores), int(len(factors_with_scores) * top_pct / 100)))
-    selected_df = factors_with_scores.nlargest(n_select, 'Alloc_Score').copy()
+    # SELEZIONE RIGIDA: prende ESATTAMENTE i top num_stocks titoli per Alloc_Score
+    selected_df = factors.nlargest(num_stocks, 'Alloc_Score').copy()
     
-    # Calcola percentuali di allocazione
+    # Ricalcolo percentuali e importi solo sui titoli selezionati
     selected_df['Allocation_Pct'] = (selected_df['Raw_Weight'] / selected_df['Raw_Weight'].sum()) * 100
     
-    st.subheader(f"🏆 Top {n_select} Titoli Selezionati (Risk-Adjusted)")
+    st.subheader(f"🏆 Top {num_stocks} Titoli Selezionati (Risk-Adjusted)")
     st.dataframe(
         selected_df[['Momentum', 'Quality', 'Volatility', 'Max_Drawdown', 'Base_Score', 'Alloc_Score', 'Allocation_Pct']].style.format({
             'Momentum': '{:.2%}',
@@ -356,43 +369,49 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_bt4:
         st.metric("Win Rate (giorni)", f"{bt['p_empirical']:.2%}")
     
-    st.subheader("📐 Parametri Kelly")
-    
-    use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=False, 
-                               help="Se attivo, usa p e b calcolati dal backtest. Se disattivo, usa i valori manuali della sidebar.")
-    
-    if use_empirical:
-        p_used = bt['p_empirical']
-        b_used = bt['b_empirical']
-        st.info(f"📊 Parametri empirici: p={p_used:.3f}, b={b_used:.2f}")
+    # Calcolo Kelly (se attivo)
+    if use_kelly:
+        st.subheader("📐 Parametri Kelly")
+        
+        use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=False, 
+                                   help="Se attivo, usa p e b calcolati dal backtest. Se disattivo, usa i valori manuali della sidebar.")
+        
+        if use_empirical:
+            p_used = bt['p_empirical']
+            b_used = bt['b_empirical']
+            st.info(f"📊 Parametri empirici: p={p_used:.3f}, b={b_used:.2f}")
+        else:
+            p_used = p_win
+            b_used = payoff_ratio
+            st.info(f"📊 Parametri manuali: p={p_used:.3f}, b={b_used:.2f}")
+        
+        kelly_pct = calculate_kelly(p_used, b_used, kelly_fraction)
+        
+        col_k1, col_k2, col_k3 = st.columns(3)
+        with col_k1:
+            st.metric("Kelly Puro", f"{calculate_kelly(p_used, b_used, 1.0):.2%}")
+        with col_k2:
+            st.metric(f"Kelly Frazionario ({kelly_fraction:.0%})", f"{kelly_pct:.2%}")
+        with col_k3:
+            st.metric("Capitale da Investire", f"€{budget_to_use * kelly_pct:,.2f}")
+        
+        if kelly_pct <= 0:
+            st.warning("⚠️ Kelly ≤ 0! Uso fallback 10%.")
+            kelly_pct = 0.10
+        
+        capital_to_invest = budget_to_use * kelly_pct
+        capital_reserve = budget_to_use - capital_to_invest
     else:
-        p_used = p_win
-        b_used = payoff_ratio
-        st.info(f"📊 Parametri manuali: p={p_used:.3f}, b={b_used:.2f}")
-    
-    kelly_pct = calculate_kelly(p_used, b_used, kelly_fraction)
-    
-    col_k1, col_k2, col_k3 = st.columns(3)
-    with col_k1:
-        st.metric("Kelly Puro", f"{calculate_kelly(p_used, b_used, 1.0):.2%}")
-    with col_k2:
-        st.metric(f"Kelly Frazionario ({kelly_fraction:.0%})", f"{kelly_pct:.2%}")
-    with col_k3:
-        st.metric("Capitale da Investire", f"€{total_capital * kelly_pct:,.2f}")
-    
-    if kelly_pct <= 0:
-        st.warning("⚠️ Kelly ≤ 0! Parametri troppo conservativi. Uso fallback 10%.")
-        kelly_pct = 0.10
+        capital_to_invest = budget_to_use
+        capital_reserve = 0
+        kelly_pct = 1.0
     
     st.header("💰 Fase 4: Allocazione Portafoglio")
     
-    capital_to_invest = total_capital * kelly_pct
-    capital_reserve = total_capital - capital_to_invest
-    
-    # Allocazione basata su pesi Risk-Adjusted (NON uguale per tutti!)
+    # Allocazione basata su pesi Risk-Adjusted
     portfolio = selected_df.copy()
     portfolio['Allocazione (€)'] = (portfolio['Allocation_Pct'] / 100) * capital_to_invest
-    portfolio['Peso % su Totale'] = (portfolio['Allocazione (€)'] / total_capital) * 100
+    portfolio['Peso % su Totale'] = (portfolio['Allocazione (€)'] / budget_to_use) * 100
     
     # Prezzi attuali
     try:
@@ -405,7 +424,10 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_p1:
         st.metric("💵 Capitale Investito", f"€{capital_to_invest:,.2f}")
     with col_p2:
-        st.metric("💰 Riserva/Liquidità", f"€{capital_reserve:,.2f}")
+        if use_kelly:
+            st.metric("💰 Riserva/Liquidità", f"€{capital_reserve:,.2f}")
+        else:
+            st.metric("💰 Budget Totale", f"€{budget_to_use:,.2f}")
     with col_p3:
         st.metric("📈 N° Azioni", f"{len(portfolio)}")
     
@@ -423,20 +445,32 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         use_container_width=True
     )
     
-    # Grafico a barre dell'allocazione
-    st.subheader("📊 Distribuzione Allocazione (Risk-Adjusted)")
-    chart_data = portfolio['Peso % su Totale'].sort_values(ascending=True)
-    st.bar_chart(chart_data, use_container_width=True)
+    # Grafico a torta con Plotly
+    st.subheader("📊 Distribuzione Capitale")
+    fig = px.pie(
+        portfolio, 
+        values='Allocation_Pct', 
+        names=portfolio.index, 
+        title=f"Distribuzione del Capitale (Rischio {risk_propensity}%)",
+        hole=0.4,
+        color_discrete_sequence=px.colors.qualitative.Set2
+    )
+    fig.update_traces(textposition='inside', textinfo='percent+label')
+    st.plotly_chart(fig, use_container_width=True)
     
-    # Profilo di rischio basato sulla propensione
+    # Profilo di rischio
     st.markdown("### 💡 Analisi del Profilo di Rischio Scelto")
     if risk_propensity <= 30:
         st.info("🛡️ **Profilo Conservativo:** Il portafoglio privilegia la stabilità (Quality) e protegge dai drawdown. Crescita più lenta ma con minori oscillazioni.")
+        st.caption("I titoli selezionati hanno alta Quality e bassa volatilità.")
     elif risk_propensity <= 70:
         st.warning("⚖️ **Profilo Bilanciato:** Il portafoglio cerca un compromesso tra Momentum e Quality per ammortizzare i ribassi.")
+        st.caption("Mix di titoli growth e value.")
     else:
         st.error("🚀 **Profilo Aggressivo:** Il portafoglio insegue il Momentum puro. Massima esposizione a titoli volatili. Potenziale di alto rendimento, ma con rischio di forti oscillazioni.")
+        st.caption("Titoli selezionati con Momentum molto alto, anche se volatili.")
     
+    # Riepilogo
     st.header("📋 Riepilogo Strategia")
     
     with st.expander("📝 Dettagli completi della strategia", expanded=True):
@@ -445,26 +479,34 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         - **Universo:** {len(valid_tickers)} azioni analizzate
         - **Periodo Lookback:** {lookback_days} giorni
         - **Propensione al Rischio:** {risk_propensity}% ({'Conservativo' if risk_propensity <= 30 else 'Bilanciato' if risk_propensity <= 70 else 'Aggressivo'})
-        - **Selezione:** Top {top_pct}% ({len(portfolio)} azioni)
+        - **Selezione:** Esattamente {num_stocks} titoli (range: {min_stocks}-{max_stocks})
         
-        **Kelly Criterion:**
+        **Kelly Criterion:** {'Attivo' if use_kelly else 'Disattivo'}
+        """ + (f"""
         - Probabilità p: {p_used:.3f}
         - Payoff ratio b: {b_used:.2f}
         - Frazionamento: {kelly_fraction:.0%}
         - **Allocazione ottimale: {kelly_pct:.2%}** del capitale
+        """ if use_kelly else """
+        - **Allocazione:** 100% del budget
+        """) + f"""
         
         **Gestione del Rischio:**
         - Capitale investito: €{capital_to_invest:,.2f}
         - Capitale in riserva: €{capital_reserve:,.2f}
         
-        **Metodo Allocazione:** Risk-Adjusted con pesi proporzionali allo score di allocazione
-        """)
+        **Metodo Allocazione:** Risk-Adjusted con pesi proporzionali allo score
+        - Formula: `Alloc_Score = Momentum*R + Quality*(1-R) - Volatility*(1-R)*2 - |Drawdown|*(1-R)*2`
+        """
+        )
     
     st.divider()
     st.caption("""
     ⚠️ **Disclaimer:** Questo strumento è a scopo educativo. Le performance passate non garantiscono risultati futuri. 
-    Il Criterio di Kelly è teorico e richiede stime accurate di p e b. Non costituisce consulenza finanziaria.
+    Il Criterio di Kelly è teorico. Non costituisce consulenza finanziaria.
     """)
+    
+    st.success(f"✅ Selezionati esattamente **{num_stocks}** titoli. Le percentuali sommano al 100% su questi soli titoli. Budget allocato: **€{capital_to_invest:,.2f}**")
 
 else:
     st.info("⚙️ Configura i parametri nella sidebar e clicca **Analizza e Costruisci Portafoglio**")
@@ -475,11 +517,15 @@ else:
     1. **📥 Input:** Inserisci ticker o carica CSV
     2. **📊 Fattori:** Calcola Momentum, Quality e Volatilità
     3. **🎯 Risk-Adjusted Allocation:** Pesi dinamici basati sulla tua propensione al rischio
-    4. **🎯 Kelly:** Calcola frazione ottimale del capitale da investire
+    4. **🎯 Kelly (opzionale):** Calcola frazione ottimale del capitale da investire
     5. **💰 Allocazione:** Distribuzione pesata per score (non uguale per tutti!)
     
-    ### 🎛️ Nuovo Parametro: Propensione al Rischio
-    - **1-30% (Conservativo):** Priorità a Quality, penalizza volatilità e drawdown
-    - **31-70% (Bilanciato):** Compromesso tra Momentum e Quality
-    - **71-100% (Aggressivo):** Priorità al Momentum, ignora volatilità
+    ### 🎛️ Nuovi Parametri:
+    
+    | Parametro | Effetto |
+    |-----------|---------|
+    | **Min/Max azioni** | Definisce il range selezionabile |
+    | **Numero titoli** | Seleziona esattamente N titoli migliori |
+    | **Usa Kelly** | Se disattivato, investe tutto il budget |
+    | **Propensione al Rischio** | 1-30% conservativo, 31-70% bilanciato, 71-100% aggressivo |
     """)
