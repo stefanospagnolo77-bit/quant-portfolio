@@ -106,7 +106,7 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
         return generate_demo_data(tickers, lookback_days)
     
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=lookback_days + 30)  # buffer per calcoli
+    start_date = end_date - timedelta(days=lookback_days + 30)
     
     progress_text = st.empty()
     progress_bar = st.progress(0)
@@ -114,30 +114,59 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
     try:
         progress_text.text("📡 Connessione a Yahoo Finance...")
         
-        # Download batch - più efficiente per molti ticker
+        # Download batch
         data = yf.download(
             tickers=tickers,
             start=start_date,
             end=end_date,
             progress=False,
             auto_adjust=True,
-            threads=True,
+            threads=False,
             group_by='ticker'
         )
         
         progress_bar.progress(0.5)
         progress_text.text("📊 Elaborazione dati scaricati...")
         
-        # Estrazione prezzi di chiusura
+        # Gestione robusta della struttura dati
+        close_prices = pd.DataFrame()
+        
         if len(tickers) == 1:
-            close_prices = data['Close'].to_frame(tickers[0])
-        elif isinstance(data.columns, pd.MultiIndex):
-            close_prices = data['Close']
+            # Singolo ticker
+            ticker = tickers[0]
+            if isinstance(data.columns, pd.MultiIndex):
+                if ('Close', ticker) in data.columns:
+                    close_prices = data[('Close', ticker)].to_frame(ticker)
+                elif 'Close' in data.columns.get_level_values(0):
+                    close_prices = data['Close'].to_frame(ticker)
+            else:
+                if 'Close' in data.columns:
+                    close_prices = data['Close'].to_frame(ticker)
+                elif 'Adj Close' in data.columns:
+                    close_prices = data['Adj Close'].to_frame(ticker)
         else:
-            close_prices = data['Close'].to_frame()
+            # Multipli ticker
+            if isinstance(data.columns, pd.MultiIndex):
+                # yfinance nuovo formato con MultiIndex
+                if 'Close' in data.columns.get_level_values(0):
+                    close_prices = data['Close']
+                elif 'Adj Close' in data.columns.get_level_values(0):
+                    close_prices = data['Adj Close']
+            else:
+                # Formato vecchio o singolo livello
+                if 'Close' in data.columns:
+                    close_prices = data['Close']
+                    if len(close_prices.shape) == 1:
+                        close_prices = close_prices.to_frame()
+                elif 'Adj Close' in data.columns:
+                    close_prices = data['Adj Close']
+                    if len(close_prices.shape) == 1:
+                        close_prices = close_prices.to_frame()
         
         # Rimuovi colonne con troppi NaN
-        close_prices = close_prices.dropna(axis=1, thresh=len(close_prices)*0.7)
+        if not close_prices.empty:
+            threshold = max(30, len(close_prices) * 0.7)
+            close_prices = close_prices.dropna(axis=1, thresh=threshold)
         
         progress_bar.progress(1.0)
         progress_text.empty()
@@ -145,6 +174,12 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
         
         if close_prices.empty:
             st.error("❌ Nessun dato valido scaricato da Yahoo Finance")
+            st.info("💡 Prova a usare la Demo Mode per testare l'app")
+            return None
+        
+        # Verifica che abbiamo abbastanza dati
+        if len(close_prices) < 30:
+            st.error(f"❌ Solo {len(close_prices)} giorni di dati disponibili (servono almeno 30)")
             return None
             
         return close_prices
@@ -153,6 +188,7 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
         progress_text.empty()
         progress_bar.empty()
         st.error(f"❌ Errore download: {str(e)}")
+        st.info("💡 Prova la Demo Mode per testare l'app senza connessione Yahoo")
         return None
 
 def calculate_factors(close_prices):
@@ -203,7 +239,7 @@ def score_stocks(factors, w_mom, w_qual, w_vol):
     # Z-score per ogni fattore
     df['Z_Momentum'] = zscore_normalize(df['Momentum'])
     df['Z_Quality'] = zscore_normalize(df['Quality'])
-    df['Z_Volatility'] = zscore_normalize(df['Volatility'])  # già invertita nel peso
+    df['Z_Volatility'] = zscore_normalize(df['Volatility'])
     
     # Score combinato (volatilità ha peso negativo - preferiamo bassa vol)
     df['Score'] = (w_mom * df['Z_Momentum'] + 
@@ -412,7 +448,7 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     st.bar_chart(chart_data, use_container_width=True)
     
     # ============================================================
-    # RIEPILOGO ESTRATEGIA
+    # RIEPILOGO STRATEGIA
     # ============================================================
     st.header("📋 Riepilogo Strategia")
     
