@@ -10,73 +10,7 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Quant Portfolio Builder Pro", layout="wide", initial_sidebar_state="expanded")
 st.title("📊 Quant Portfolio Builder Pro")
-st.markdown("*Multi-Factor Scoring + Fractional Kelly Optimization*")
-
-# ============================================================
-# 0. WORKAROUND PER YAHOO FINANCE SU STREAMLIT CLOUD
-# ============================================================
-def patch_yfinance():
-    """Applica patch per bypassare blocco IP di Yahoo Finance"""
-    try:
-        # Forza l'uso di un proxy alternativo (yfinance usa un backend diverso)
-        import urllib.request
-        
-        # Alternativa: usa yfinance con download multi-thread e delay
-        original_get = yf.Ticker
-        
-        # Imposta timeout e retry
-        yf.Ticker.cache = {}
-        
-        return True
-    except:
-        return False
-
-# Alternativa: usa pandas-datareader come fallback
-def fetch_with_fallback(tickers, start, end):
-    """Tenta diversi metodi per scaricare i dati"""
-    methods = [
-        'yfinance',
-        'yfinance_retry',
-        'pandas_datareader'
-    ]
-    
-    for method in methods:
-        try:
-            if method == 'yfinance':
-                data = yf.download(
-                    tickers=tickers,
-                    start=start,
-                    end=end,
-                    progress=False,
-                    auto_adjust=True,
-                    threads=True,
-                    group_by='ticker'
-                )
-                if not data.empty:
-                    return data
-                    
-            elif method == 'yfinance_retry':
-                # Versione con retry e delay
-                for attempt in range(3):
-                    try:
-                        time.sleep(1 + attempt)
-                        data = yf.download(
-                            tickers=tickers,
-                            start=start,
-                            end=end,
-                            progress=False,
-                            auto_adjust=True,
-                            threads=False
-                        )
-                        if not data.empty:
-                            return data
-                    except:
-                        continue
-                        
-        except Exception as e:
-            continue
-    
-    return None
+st.markdown("*Multi-Factor Scoring + Fractional Kelly Optimization + Risk-Adjusted Allocation*")
 
 # ============================================================
 # 1. CONFIGURAZIONE SIDEBAR
@@ -85,28 +19,31 @@ st.sidebar.header("⚙️ Parametri Strategia")
 
 total_capital = st.sidebar.number_input("Capitale Totale (€)", value=10000, step=1000, min_value=1000)
 
+st.sidebar.subheader("📊 Risk-Adjusted Allocation")
+risk_propensity = st.sidebar.slider(
+    "Propensione al Rischio", 
+    min_value=1, 
+    max_value=100, 
+    value=50, 
+    help="1% = Conservativo (priorità a Quality e stabilità), 100% = Aggressivo (priorità al Momentum)"
+)
+
 st.sidebar.subheader("Parametri Kelly")
 col_k1, col_k2 = st.sidebar.columns(2)
 with col_k1:
-    p_win = st.number_input("Probabilità p", min_value=0.1, max_value=0.95, value=0.55, step=0.01, 
-                           help="Probabilità empirica di successo del portafoglio")
+    p_win = st.number_input("Probabilità p", min_value=0.1, max_value=0.95, value=0.55, step=0.01)
 with col_k2:
-    payoff_ratio = st.number_input("Payoff Ratio b", min_value=0.5, max_value=10.0, value=1.5, step=0.1,
-                                  help="Guadagno medio / Perdita media")
+    payoff_ratio = st.number_input("Payoff Ratio b", min_value=0.5, max_value=10.0, value=1.5, step=0.1)
 
-kelly_fraction = st.sidebar.slider("Frazionamento Kelly", min_value=0.1, max_value=1.0, value=0.25, step=0.05,
-                                  help="0.25 = Quarter Kelly (conservativo), 0.5 = Half Kelly")
+kelly_fraction = st.sidebar.slider("Frazionamento Kelly", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
 
-st.sidebar.subheader("Pesi Fattori")
+st.sidebar.subheader("Pesi Fattori (Base)")
 w_momentum = st.sidebar.slider("Peso Momentum", 0.0, 1.0, 0.4, 0.05)
 w_quality = st.sidebar.slider("Peso Quality (Sharpe)", 0.0, 1.0, 0.35, 0.05)
 w_volatility = st.sidebar.slider("Peso Volatilità (invertita)", 0.0, 1.0, 0.25, 0.05)
 
-lookback_days = st.sidebar.selectbox("Periodo Analisi", [90, 180, 252, 500], index=1,
-                                    help="Giorni di dati storici da analizzare")
-
-top_pct = st.sidebar.slider("Selezione Top %", 1, 20, 10, 1,
-                           help="Percentuale di titoli da selezionare dal totale")
+lookback_days = st.sidebar.selectbox("Periodo Analisi", [90, 180, 252, 500], index=1)
+top_pct = st.sidebar.slider("Selezione Top %", 1, 20, 10, 1)
 min_stocks = st.sidebar.number_input("Minimo azioni portfolio", min_value=1, max_value=50, value=5)
 
 st.sidebar.subheader("🌍 Universo di Investimento")
@@ -120,7 +57,6 @@ if input_method == "📝 Lista Ticker":
         height=120
     )
     tickers_list = [t.strip().upper() for t in ticker_input.split(',') if t.strip()]
-    
 elif input_method == "📁 Carica CSV":
     uploaded_file = st.sidebar.file_uploader("CSV con colonna 'Ticker'", type=['csv'])
     if uploaded_file:
@@ -162,11 +98,9 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
     progress_text = st.empty()
     progress_bar = st.progress(0)
     
-    # Strategia 1: Prova con yfinance standard (a volte funziona su alcuni ticker)
     try:
         progress_text.text("📡 Tentativo 1/3: Connessione diretta...")
         
-        # IMPORTANTE: Usa solo ticker verificati e limita il numero
         batch_size = 50
         all_data = []
         
@@ -187,7 +121,7 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
                 
                 if not data.empty:
                     all_data.append(data)
-                time.sleep(0.5)  # Delay tra batch
+                time.sleep(0.5)
                 
             except Exception as e:
                 st.warning(f"Batch {batch} fallito: {str(e)[:50]}")
@@ -197,7 +131,6 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
         
         if all_data:
             progress_text.text("📊 Unione dati...")
-            # Unisce i dati multi-batch
             close_data = []
             for data_chunk in all_data:
                 if len(tickers) == 1:
@@ -213,8 +146,6 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
             if close_data:
                 close_prices = pd.concat(close_data, axis=1)
                 close_prices = close_prices.loc[:, ~close_prices.columns.duplicated()]
-                
-                # Pulizia
                 threshold = max(30, len(close_prices) * 0.5)
                 close_prices = close_prices.dropna(axis=1, thresh=threshold)
                 
@@ -228,15 +159,14 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
     except Exception as e:
         st.warning(f"Download diretto fallito: {str(e)[:100]}")
     
-    # Strategia 2: Prova con download singoli ticker
     progress_text.text("📡 Tentativo 2/3: Download singoli ticker...")
     
     close_prices = pd.DataFrame()
     successful = []
     
-    for i, ticker in enumerate(tickers[:100]):  # Limita a 100 per performance
+    for i, ticker in enumerate(tickers[:100]):
         try:
-            time.sleep(0.3)  # Delay per evitare rate limiting
+            time.sleep(0.3)
             ticker_obj = yf.Ticker(ticker)
             hist = ticker_obj.history(start=start_date, end=end_date, auto_adjust=True)
             
@@ -249,19 +179,15 @@ def fetch_data_batch(tickers, lookback_days, demo_mode=False):
         except Exception as e:
             continue
     
-    if len(successful) >= min_stocks:
+    if len(successful) >= 5:
         progress_text.empty()
         progress_bar.empty()
         st.success(f"✅ Scaricati {len(successful)} ticker via download singolo")
         return close_prices
     
-    # Strategia 3: Usa dati demo e avvisa l'utente
     progress_text.empty()
     progress_bar.empty()
-    
     st.warning("⚠️ Yahoo Finance blocca gli IP cloud. Attivazione automatica Demo Mode.")
-    st.info("💡 Per dati reali: esegui localmente o usa un servizio alternativo come Alpha Vantage (API key richiesta)")
-    
     return generate_demo_data(tickers[:min(30, len(tickers))], lookback_days)
 
 def calculate_factors(close_prices):
@@ -296,11 +222,31 @@ def score_stocks(factors, w_mom, w_qual, w_vol):
     df['Z_Quality'] = zscore_normalize(df['Quality'])
     df['Z_Volatility'] = zscore_normalize(df['Volatility'])
     
-    df['Score'] = (w_mom * df['Z_Momentum'] + 
-                   w_qual * df['Z_Quality'] - 
-                   w_vol * df['Z_Volatility'])
+    df['Base_Score'] = (w_mom * df['Z_Momentum'] + 
+                        w_qual * df['Z_Quality'] - 
+                        w_vol * df['Z_Volatility'])
     
-    return df.sort_values('Score', ascending=False)
+    return df
+
+def calculate_risk_adjusted_allocations(factors, risk_propensity):
+    """
+    Calcola pesi dinamici basati sulla propensione al rischio.
+    R = 0 (conservativo) -> priorità a Quality, penalità a Volatility e Drawdown
+    R = 1 (aggressivo) -> priorità a Momentum
+    """
+    df = factors.copy()
+    R = risk_propensity / 100.0
+    
+    # Allocation Score personalizzato
+    df['Alloc_Score'] = (df['Momentum'] * R) + \
+                        (df['Quality'] * (1 - R)) - \
+                        (df['Volatility'] * (1 - R) * 2) - \
+                        (abs(df['Max_Drawdown']) * (1 - R) * 2)
+    
+    # Evita pesi negativi
+    df['Raw_Weight'] = np.where(df['Alloc_Score'] > 0, df['Alloc_Score'], 0.01)
+    
+    return df
 
 def calculate_kelly(p, b, fraction):
     q = 1 - p
@@ -339,7 +285,7 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         st.warning("⚠️ Inserisci dei ticker o attiva la Demo Mode")
         st.stop()
     
-    if len(tickers_list) > 200:  # Ridotto limite per performance
+    if len(tickers_list) > 200:
         st.warning(f"⚠️ Limitato a 200 ticker (hai inserito {len(tickers_list)})")
         tickers_list = tickers_list[:200]
     
@@ -365,34 +311,40 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     with st.spinner("Calcolo Momentum, Quality e Volatilità..."):
         factors = calculate_factors(close_prices)
-        scored = score_stocks(factors, w_momentum, w_quality, w_volatility)
+        factors_with_scores = score_stocks(factors, w_momentum, w_quality, w_volatility)
+        
+        # Applica Risk-Adjusted Allocation
+        factors_with_weights = calculate_risk_adjusted_allocations(factors, risk_propensity)
+        
+        # Unisci i due dataframe
+        for col in ['Base_Score', 'Alloc_Score', 'Raw_Weight']:
+            if col in factors_with_weights.columns:
+                factors_with_scores[col] = factors_with_weights[col]
     
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
-        st.metric("Media Momentum", f"{factors['Momentum'].mean():.2%}")
-    with col_f2:
-        st.metric("Media Sharpe", f"{factors['Quality'].mean():.2f}")
-    with col_f3:
-        st.metric("Media Volatilità", f"{factors['Volatility'].mean():.2%}")
+    # Seleziona top ticker basati su Alloc_Score (Risk-Adjusted)
+    n_select = max(min_stocks, min(len(factors_with_scores), int(len(factors_with_scores) * top_pct / 100)))
+    selected_df = factors_with_scores.nlargest(n_select, 'Alloc_Score').copy()
     
-    n_select = max(min_stocks, min(len(scored), int(len(scored) * top_pct / 100)))
-    selected = scored.head(n_select)
+    # Calcola percentuali di allocazione
+    selected_df['Allocation_Pct'] = (selected_df['Raw_Weight'] / selected_df['Raw_Weight'].sum()) * 100
     
-    st.subheader(f"🏆 Top {n_select} Titoli Selezionati")
+    st.subheader(f"🏆 Top {n_select} Titoli Selezionati (Risk-Adjusted)")
     st.dataframe(
-        selected[['Momentum', 'Quality', 'Volatility', 'Max_Drawdown', 'Score']].style.format({
+        selected_df[['Momentum', 'Quality', 'Volatility', 'Max_Drawdown', 'Base_Score', 'Alloc_Score', 'Allocation_Pct']].style.format({
             'Momentum': '{:.2%}',
             'Quality': '{:.2f}',
             'Volatility': '{:.2%}',
             'Max_Drawdown': '{:.2%}',
-            'Score': '{:.2f}'
+            'Base_Score': '{:.2f}',
+            'Alloc_Score': '{:.2f}',
+            'Allocation_Pct': '{:.2f}%'
         }),
         use_container_width=True
     )
     
     st.header("🎯 Fase 3: Backtest e Calcolo Kelly")
     
-    bt = backtest_portfolio(close_prices, selected.index.tolist(), lookback_days)
+    bt = backtest_portfolio(close_prices, selected_df.index.tolist(), lookback_days)
     
     col_bt1, col_bt2, col_bt3, col_bt4 = st.columns(4)
     with col_bt1:
@@ -406,15 +358,17 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     st.subheader("📐 Parametri Kelly")
     
-    use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=True)  # Default True
+    use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=False, 
+                               help="Se attivo, usa p e b calcolati dal backtest. Se disattivo, usa i valori manuali della sidebar.")
     
     if use_empirical:
         p_used = bt['p_empirical']
         b_used = bt['b_empirical']
-        st.info(f"📊 Parametri empirici (dal backtest): p={p_used:.3f}, b={b_used:.2f}")
+        st.info(f"📊 Parametri empirici: p={p_used:.3f}, b={b_used:.2f}")
     else:
         p_used = p_win
         b_used = payoff_ratio
+        st.info(f"📊 Parametri manuali: p={p_used:.3f}, b={b_used:.2f}")
     
     kelly_pct = calculate_kelly(p_used, b_used, kelly_fraction)
     
@@ -422,8 +376,7 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_k1:
         st.metric("Kelly Puro", f"{calculate_kelly(p_used, b_used, 1.0):.2%}")
     with col_k2:
-        st.metric(f"Kelly Frazionario ({kelly_fraction:.0%})", f"{kelly_pct:.2%}", 
-                 delta=f"Riduzione rischio {((1-kelly_fraction)*100):.0f}%")
+        st.metric(f"Kelly Frazionario ({kelly_fraction:.0%})", f"{kelly_pct:.2%}")
     with col_k3:
         st.metric("Capitale da Investire", f"€{total_capital * kelly_pct:,.2f}")
     
@@ -435,14 +388,13 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     capital_to_invest = total_capital * kelly_pct
     capital_reserve = total_capital - capital_to_invest
-    n_stocks = len(selected)
-    allocation_per_stock = capital_to_invest / n_stocks if n_stocks > 0 else 0
     
-    portfolio = selected.copy()
-    portfolio['Allocazione (€)'] = allocation_per_stock
-    portfolio['Peso %'] = (allocation_per_stock / total_capital) * 100
+    # Allocazione basata su pesi Risk-Adjusted (NON uguale per tutti!)
+    portfolio = selected_df.copy()
+    portfolio['Allocazione (€)'] = (portfolio['Allocation_Pct'] / 100) * capital_to_invest
+    portfolio['Peso % su Totale'] = (portfolio['Allocazione (€)'] / total_capital) * 100
     
-    # Evita errore se close_prices non ha i ticker selezionati
+    # Prezzi attuali
     try:
         portfolio['Prezzo Attuale'] = close_prices[portfolio.index].iloc[-1]
         portfolio['Azioni (stimato)'] = portfolio['Allocazione (€)'] / portfolio['Prezzo Attuale']
@@ -455,24 +407,35 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_p2:
         st.metric("💰 Riserva/Liquidità", f"€{capital_reserve:,.2f}")
     with col_p3:
-        st.metric("📈 N° Azioni", f"{n_stocks}")
+        st.metric("📈 N° Azioni", f"{len(portfolio)}")
     
-    st.subheader("📋 Portfolio Finale")
+    st.subheader("📋 Portfolio Finale (Con Pesi Differenziati)")
     st.dataframe(
-        portfolio[['Momentum', 'Quality', 'Volatility', 'Score', 'Allocazione (€)', 'Peso %']].style.format({
+        portfolio[['Momentum', 'Quality', 'Volatility', 'Alloc_Score', 'Allocation_Pct', 'Allocazione (€)', 'Peso % su Totale']].style.format({
             'Momentum': '{:.2%}',
             'Quality': '{:.2f}',
             'Volatility': '{:.2%}',
-            'Score': '{:.2f}',
+            'Alloc_Score': '{:.2f}',
+            'Allocation_Pct': '{:.2f}%',
             'Allocazione (€)': '{:,.2f} €',
-            'Peso %': '{:.2f}%'
+            'Peso % su Totale': '{:.2f}%'
         }),
         use_container_width=True
     )
     
-    st.subheader("📊 Distribuzione Allocazione")
-    chart_data = portfolio['Peso %'].sort_values(ascending=True)
+    # Grafico a barre dell'allocazione
+    st.subheader("📊 Distribuzione Allocazione (Risk-Adjusted)")
+    chart_data = portfolio['Peso % su Totale'].sort_values(ascending=True)
     st.bar_chart(chart_data, use_container_width=True)
+    
+    # Profilo di rischio basato sulla propensione
+    st.markdown("### 💡 Analisi del Profilo di Rischio Scelto")
+    if risk_propensity <= 30:
+        st.info("🛡️ **Profilo Conservativo:** Il portafoglio privilegia la stabilità (Quality) e protegge dai drawdown. Crescita più lenta ma con minori oscillazioni.")
+    elif risk_propensity <= 70:
+        st.warning("⚖️ **Profilo Bilanciato:** Il portafoglio cerca un compromesso tra Momentum e Quality per ammortizzare i ribassi.")
+    else:
+        st.error("🚀 **Profilo Aggressivo:** Il portafoglio insegue il Momentum puro. Massima esposizione a titoli volatili. Potenziale di alto rendimento, ma con rischio di forti oscillazioni.")
     
     st.header("📋 Riepilogo Strategia")
     
@@ -481,8 +444,8 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         **Parametri Utilizzati:**
         - **Universo:** {len(valid_tickers)} azioni analizzate
         - **Periodo Lookback:** {lookback_days} giorni
-        - **Fattori:** Momentum ({w_momentum:.0%}), Quality ({w_quality:.0%}), Low-Vol ({w_volatility:.0%})
-        - **Selezione:** Top {top_pct}% ({n_stocks} azioni)
+        - **Propensione al Rischio:** {risk_propensity}% ({'Conservativo' if risk_propensity <= 30 else 'Bilanciato' if risk_propensity <= 70 else 'Aggressivo'})
+        - **Selezione:** Top {top_pct}% ({len(portfolio)} azioni)
         
         **Kelly Criterion:**
         - Probabilità p: {p_used:.3f}
@@ -493,9 +456,8 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         **Gestione del Rischio:**
         - Capitale investito: €{capital_to_invest:,.2f}
         - Capitale in riserva: €{capital_reserve:,.2f}
-        - Cuscinetto anti-drawdown: {((1-kelly_pct)*100):.1f}%
         
-        **Rebalancing:** Ogni 3-6 mesi ricalcolare fattori e dimensioni posizioni
+        **Metodo Allocazione:** Risk-Adjusted con pesi proporzionali allo score di allocazione
         """)
     
     st.divider()
@@ -510,16 +472,14 @@ else:
     st.markdown("""
     ### Come funziona questa app:
     
-    1. **📥 Input:** Inserisci fino a 200 ticker o usa la Demo Mode
-    2. **📊 Fattori:** Calcola Momentum, Quality (Sharpe) e Low-Volatility
-    3. **🏆 Scoring:** Z-score normalization e ranking combinato
-    4. **🎯 Kelly:** Stima p e b, calcola frazione ottimale con conservativismo
-    5. **💰 Allocazione:** Distribuisce il capitale sul top decile
+    1. **📥 Input:** Inserisci ticker o carica CSV
+    2. **📊 Fattori:** Calcola Momentum, Quality e Volatilità
+    3. **🎯 Risk-Adjusted Allocation:** Pesi dinamici basati sulla tua propensione al rischio
+    4. **🎯 Kelly:** Calcola frazione ottimale del capitale da investire
+    5. **💰 Allocazione:** Distribuzione pesata per score (non uguale per tutti!)
     
-    ### ⚠️ Nota su Yahoo Finance:
-    Su Streamlit Cloud, Yahoo Finance può bloccare le richieste. L'app:
-    - Prova automaticamente 3 strategie di download differenti
-    - Usa download in batch e single-ticker
-    - Se tutto fallisce, attiva la **Demo Mode** automaticamente
-    - Per dati reali, esegui localmente o usa un'API key di Alpha Vantage
+    ### 🎛️ Nuovo Parametro: Propensione al Rischio
+    - **1-30% (Conservativo):** Priorità a Quality, penalizza volatilità e drawdown
+    - **31-70% (Bilanciato):** Compromesso tra Momentum e Quality
+    - **71-100% (Aggressivo):** Priorità al Momentum, ignora volatilità
     """)
