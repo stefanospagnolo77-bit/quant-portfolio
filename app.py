@@ -29,6 +29,23 @@ risk_propensity = st.sidebar.slider(
     help="1% = Conservativo (priorità a Quality), 100% = Aggressivo (priorità al Momentum)"
 )
 
+st.sidebar.subheader("🚫 Limiti di Concentrazione")
+max_single_weight = st.sidebar.slider(
+    "Peso massimo per singolo titolo (%)", 
+    min_value=10, 
+    max_value=50, 
+    value=25,
+    help="Limita la percentuale massima che un singolo titolo può avere nel portafoglio"
+)
+
+max_sector_weight = st.sidebar.slider(
+    "Peso massimo per settore (%)", 
+    min_value=30, 
+    max_value=100, 
+    value=60,
+    help="Limita la percentuale massima che un intero settore può avere nel portafoglio"
+)
+
 st.sidebar.subheader("📊 Selezione Titoli")
 col_min, col_max = st.sidebar.columns(2)
 with col_min:
@@ -97,6 +114,76 @@ else:
 # ============================================================
 # 2. FUNZIONI CORE
 # ============================================================
+
+def get_sector(ticker):
+    """Mappa ticker a settori approssimativi (per limiti di concentrazione)"""
+    # Tech/Semiconductors
+    tech_tickers = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMD', 'INTC', 'QCOM', 'TXN', 
+                    'AMAT', 'LRCX', 'KLAC', 'MRVL', 'MU', 'TSM', 'AVGO', 'CRM', 'ADBE',
+                    'CSCO', 'IBM', 'ORCL', 'NOW', 'INTU', 'PANW', 'CRWD', 'NET', 'DDOG', 'SNOW']
+    
+    # Financials
+    financial_tickers = ['JPM', 'BAC', 'V', 'MA', 'WFC', 'C', 'GS', 'MS', 'BLK', 'AXP', 'COF']
+    
+    # Healthcare
+    healthcare_tickers = ['JNJ', 'PFE', 'MRK', 'ABBV', 'LLY', 'NVO', 'UNH', 'CVS', 'AMGN', 'GILD']
+    
+    # Energy
+    energy_tickers = ['XOM', 'CVX', 'COP', 'EOG', 'SLB', 'MPC', 'VLO', 'PSX']
+    
+    # Consumer
+    consumer_tickers = ['PG', 'KO', 'PEP', 'COST', 'WMT', 'HD', 'MCD', 'NKE', 'SBUX', 'DIS']
+    
+    # Industrials
+    industrial_tickers = ['CAT', 'GE', 'BA', 'HON', 'RTX', 'LMT', 'UPS', 'UNP', 'DE']
+    
+    if ticker in tech_tickers:
+        return 'Technology'
+    elif ticker in financial_tickers:
+        return 'Financials'
+    elif ticker in healthcare_tickers:
+        return 'Healthcare'
+    elif ticker in energy_tickers:
+        return 'Energy'
+    elif ticker in consumer_tickers:
+        return 'Consumer'
+    elif ticker in industrial_tickers:
+        return 'Industrials'
+    else:
+        return 'Other'
+
+def apply_concentration_limits(portfolio_df, max_single_pct, max_sector_pct):
+    """
+    Applica limiti di concentrazione:
+    - Nessun singolo titolo supera max_single_pct%
+    - Nessun settore supera max_sector_pct%
+    """
+    df = portfolio_df.copy()
+    
+    # Aggiungi colonna settore
+    df['Sector'] = df.index.map(get_sector)
+    
+    # 1. Limite per singolo titolo
+    if df['Allocation_Pct'].max() > max_single_pct:
+        df['Allocation_Pct'] = df['Allocation_Pct'].clip(upper=max_single_pct)
+        # Rinormalizza
+        df['Allocation_Pct'] = (df['Allocation_Pct'] / df['Allocation_Pct'].sum()) * 100
+    
+    # 2. Limite per settore
+    sector_totals = df.groupby('Sector')['Allocation_Pct'].sum()
+    
+    if sector_totals.max() > max_sector_pct:
+        # Calcola fattore di riduzione per il settore eccedente
+        for sector in sector_totals.index:
+            if sector_totals[sector] > max_sector_pct:
+                reduction_factor = max_sector_pct / sector_totals[sector]
+                mask = df['Sector'] == sector
+                df.loc[mask, 'Allocation_Pct'] = df.loc[mask, 'Allocation_Pct'] * reduction_factor
+        
+        # Rinormalizza tutto il portafoglio
+        df['Allocation_Pct'] = (df['Allocation_Pct'] / df['Allocation_Pct'].sum()) * 100
+    
+    return df
 
 def generate_demo_data(tickers, lookback_days):
     np.random.seed(42)
@@ -240,21 +327,14 @@ def zscore_normalize(series):
     return (series - mean) / std
 
 def calculate_risk_adjusted_allocations(factors, risk_propensity):
-    """
-    Calcola pesi dinamici basati sulla propensione al rischio.
-    R = 0 (conservativo) -> priorità a Quality, penalità a Volatility e Drawdown
-    R = 1 (aggressivo) -> priorità a Momentum
-    """
     df = factors.copy()
     R = risk_propensity / 100.0
     
-    # Allocation Score personalizzato
     df['Alloc_Score'] = (df['Momentum'] * R) + \
                         (df['Quality'] * (1 - R)) - \
                         (df['Volatility'] * (1 - R) * 2) - \
                         (abs(df['Max_Drawdown']) * (1 - R) * 2)
     
-    # Evita pesi negativi
     df['Raw_Weight'] = np.maximum(df['Alloc_Score'], 0.01)
     
     return df
@@ -323,11 +403,8 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     with st.spinner("Calcolo Momentum, Quality e Volatilità..."):
         factors = calculate_factors(close_prices)
-        
-        # Applica Risk-Adjusted Allocation
         factors = calculate_risk_adjusted_allocations(factors, risk_propensity)
         
-        # Calcola anche base score per riferimento
         factors['Z_Momentum'] = zscore_normalize(factors['Momentum'])
         factors['Z_Quality'] = zscore_normalize(factors['Quality'])
         factors['Z_Volatility'] = zscore_normalize(factors['Volatility'])
@@ -335,15 +412,24 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
                                   w_quality * factors['Z_Quality'] - 
                                   w_volatility * factors['Z_Volatility'])
     
-    # SELEZIONE RIGIDA: prende ESATTAMENTE i top num_stocks titoli per Alloc_Score
+    # Selezione top N titoli per Alloc_Score
     selected_df = factors.nlargest(num_stocks, 'Alloc_Score').copy()
     
-    # Ricalcolo percentuali e importi solo sui titoli selezionati
+    # Calcolo pesi iniziali
     selected_df['Allocation_Pct'] = (selected_df['Raw_Weight'] / selected_df['Raw_Weight'].sum()) * 100
     
+    # APPLICA LIMITI DI CONCENTRAZIONE
+    original_weights = selected_df['Allocation_Pct'].copy()
+    selected_df = apply_concentration_limits(selected_df, max_single_weight, max_sector_weight)
+    limits_applied = not selected_df['Allocation_Pct'].equals(original_weights)
+    
     st.subheader(f"🏆 Top {num_stocks} Titoli Selezionati (Risk-Adjusted)")
+    
+    # Aggiungi colonna settore per visualizzazione
+    selected_df['Sector'] = selected_df.index.map(get_sector)
+    
     st.dataframe(
-        selected_df[['Momentum', 'Quality', 'Volatility', 'Max_Drawdown', 'Base_Score', 'Alloc_Score', 'Allocation_Pct']].style.format({
+        selected_df[['Sector', 'Momentum', 'Quality', 'Volatility', 'Max_Drawdown', 'Base_Score', 'Alloc_Score', 'Allocation_Pct']].style.format({
             'Momentum': '{:.2%}',
             'Quality': '{:.2f}',
             'Volatility': '{:.2%}',
@@ -354,6 +440,14 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
         }),
         use_container_width=True
     )
+    
+    if limits_applied:
+        st.info(f"⚠️ **Limiti di concentrazione applicati:** Singolo titolo ≤ {max_single_weight}%, Settore ≤ {max_sector_weight}%")
+        # Mostra la distribuzione per settore dopo i limiti
+        sector_dist = selected_df.groupby('Sector')['Allocation_Pct'].sum().sort_values(ascending=False)
+        st.write("**Distribuzione per settore dopo i limiti:**")
+        for sector, pct in sector_dist.items():
+            st.write(f"- {sector}: {pct:.1f}%")
     
     st.header("🎯 Fase 3: Backtest e Calcolo Kelly")
     
@@ -369,12 +463,10 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_bt4:
         st.metric("Win Rate (giorni)", f"{bt['p_empirical']:.2%}")
     
-    # Calcolo Kelly (se attivo)
     if use_kelly:
         st.subheader("📐 Parametri Kelly")
         
-        use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=False, 
-                                   help="Se attivo, usa p e b calcolati dal backtest. Se disattivo, usa i valori manuali della sidebar.")
+        use_empirical = st.checkbox("Usa parametri empirici dal backtest", value=False)
         
         if use_empirical:
             p_used = bt['p_empirical']
@@ -408,12 +500,11 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     
     st.header("💰 Fase 4: Allocazione Portafoglio")
     
-    # Allocazione basata su pesi Risk-Adjusted
+    # Allocazione basata su pesi Risk-Adjusted (già limitati)
     portfolio = selected_df.copy()
     portfolio['Allocazione (€)'] = (portfolio['Allocation_Pct'] / 100) * capital_to_invest
     portfolio['Peso % su Totale'] = (portfolio['Allocazione (€)'] / budget_to_use) * 100
     
-    # Prezzi attuali
     try:
         portfolio['Prezzo Attuale'] = close_prices[portfolio.index].iloc[-1]
         portfolio['Azioni (stimato)'] = portfolio['Allocazione (€)'] / portfolio['Prezzo Attuale']
@@ -431,22 +522,25 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     with col_p3:
         st.metric("📈 N° Azioni", f"{len(portfolio)}")
     
-    st.subheader("📋 Portfolio Finale (Con Pesi Differenziati)")
+    st.subheader("📋 Portfolio Finale (Con Pesi Differenziati e Limiti di Concentrazione)")
     st.dataframe(
-        portfolio[['Momentum', 'Quality', 'Volatility', 'Alloc_Score', 'Allocation_Pct', 'Allocazione (€)', 'Peso % su Totale']].style.format({
-            'Momentum': '{:.2%}',
-            'Quality': '{:.2f}',
-            'Volatility': '{:.2%}',
-            'Alloc_Score': '{:.2f}',
+        portfolio[['Sector', 'Allocation_Pct', 'Allocazione (€)', 'Peso % su Totale', 'Prezzo Attuale', 'Azioni (stimato)']].style.format({
             'Allocation_Pct': '{:.2f}%',
             'Allocazione (€)': '{:,.2f} €',
-            'Peso % su Totale': '{:.2f}%'
+            'Peso % su Totale': '{:.2f}%',
+            'Prezzo Attuale': '${:.2f}',
+            'Azioni (stimato)': '{:.2f}'
         }),
         use_container_width=True
     )
     
+    # Grafico a barre per settori
+    st.subheader("📊 Distribuzione per Settore")
+    sector_dist = portfolio.groupby('Sector')['Allocazione (€)'].sum().sort_values(ascending=False)
+    st.bar_chart(sector_dist)
+    
     # Grafico a torta con Plotly
-    st.subheader("📊 Distribuzione Capitale")
+    st.subheader("📊 Distribuzione Capitale per Titolo")
     fig = px.pie(
         portfolio, 
         values='Allocation_Pct', 
@@ -461,71 +555,50 @@ if st.sidebar.button("🚀 Analizza e Costruisci Portafoglio", type="primary", u
     # Profilo di rischio
     st.markdown("### 💡 Analisi del Profilo di Rischio Scelto")
     if risk_propensity <= 30:
-        st.info("🛡️ **Profilo Conservativo:** Il portafoglio privilegia la stabilità (Quality) e protegge dai drawdown. Crescita più lenta ma con minori oscillazioni.")
-        st.caption("I titoli selezionati hanno alta Quality e bassa volatilità.")
+        st.info("🛡️ **Profilo Conservativo:** Il portafoglio privilegia la stabilità (Quality) e protegge dai drawdown.")
     elif risk_propensity <= 70:
-        st.warning("⚖️ **Profilo Bilanciato:** Il portafoglio cerca un compromesso tra Momentum e Quality per ammortizzare i ribassi.")
-        st.caption("Mix di titoli growth e value.")
+        st.warning("⚖️ **Profilo Bilanciato:** Il portafoglio cerca un compromesso tra Momentum e Quality.")
     else:
-        st.error("🚀 **Profilo Aggressivo:** Il portafoglio insegue il Momentum puro. Massima esposizione a titoli volatili. Potenziale di alto rendimento, ma con rischio di forti oscillazioni.")
-        st.caption("Titoli selezionati con Momentum molto alto, anche se volatili.")
+        st.error("🚀 **Profilo Aggressivo:** Il portafoglio insegue il Momentum puro. Rischio di forti oscillazioni.")
     
-    # Riepilogo
-    st.header("📋 Riepilogo Strategia")
-    
-    with st.expander("📝 Dettagli completi della strategia", expanded=True):
+    # Riepilogo limiti di concentrazione
+    with st.expander("📊 Dettaglio Limiti di Concentrazione Applicati"):
         st.markdown(f"""
-        **Parametri Utilizzati:**
-        - **Universo:** {len(valid_tickers)} azioni analizzate
-        - **Periodo Lookback:** {lookback_days} giorni
-        - **Propensione al Rischio:** {risk_propensity}% ({'Conservativo' if risk_propensity <= 30 else 'Bilanciato' if risk_propensity <= 70 else 'Aggressivo'})
-        - **Selezione:** Esattamente {num_stocks} titoli (range: {min_stocks}-{max_stocks})
+        **Limiti configurati:**
+        - **Peso massimo per singolo titolo:** {max_single_weight}%
+        - **Peso massimo per settore:** {max_sector_weight}%
         
-        **Kelly Criterion:** {'Attivo' if use_kelly else 'Disattivo'}
-        """ + (f"""
-        - Probabilità p: {p_used:.3f}
-        - Payoff ratio b: {b_used:.2f}
-        - Frazionamento: {kelly_fraction:.0%}
-        - **Allocazione ottimale: {kelly_pct:.2%}** del capitale
-        """ if use_kelly else """
-        - **Allocazione:** 100% del budget
-        """) + f"""
+        **Distribuzione finale per settore:**
+        """)
+        for sector, pct in sector_dist.items():
+            bar_length = int(pct / max(sector_dist.max(), 1) * 30)
+            st.markdown(f"- {sector}: {pct:.1f}% {'█' * bar_length}")
         
-        **Gestione del Rischio:**
-        - Capitale investito: €{capital_to_invest:,.2f}
-        - Capitale in riserva: €{capital_reserve:,.2f}
-        
-        **Metodo Allocazione:** Risk-Adjusted con pesi proporzionali allo score
-        - Formula: `Alloc_Score = Momentum*R + Quality*(1-R) - Volatility*(1-R)*2 - |Drawdown|*(1-R)*2`
-        """
-        )
+        if max_single_weight < 100 or max_sector_weight < 100:
+            st.success("✅ I limiti di concentrazione aiutano a ridurre il rischio di esposizione eccessiva a singoli titoli o settori.")
     
     st.divider()
     st.caption("""
     ⚠️ **Disclaimer:** Questo strumento è a scopo educativo. Le performance passate non garantiscono risultati futuri. 
-    Il Criterio di Kelly è teorico. Non costituisce consulenza finanziaria.
+    Non costituisce consulenza finanziaria.
     """)
     
-    st.success(f"✅ Selezionati esattamente **{num_stocks}** titoli. Le percentuali sommano al 100% su questi soli titoli. Budget allocato: **€{capital_to_invest:,.2f}**")
+    st.success(f"✅ Selezionati esattamente **{num_stocks}** titoli. Limiti: max {max_single_weight}% per titolo, {max_sector_weight}% per settore. Budget allocato: **€{capital_to_invest:,.2f}**")
 
 else:
     st.info("⚙️ Configura i parametri nella sidebar e clicca **Analizza e Costruisci Portafoglio**")
     
     st.markdown("""
-    ### Come funziona questa app:
-    
-    1. **📥 Input:** Inserisci ticker o carica CSV
-    2. **📊 Fattori:** Calcola Momentum, Quality e Volatilità
-    3. **🎯 Risk-Adjusted Allocation:** Pesi dinamici basati sulla tua propensione al rischio
-    4. **🎯 Kelly (opzionale):** Calcola frazione ottimale del capitale da investire
-    5. **💰 Allocazione:** Distribuzione pesata per score (non uguale per tutti!)
-    
-    ### 🎛️ Nuovi Parametri:
+    ### 🎛️ Nuovi Parametri di Gestione del Rischio:
     
     | Parametro | Effetto |
     |-----------|---------|
-    | **Min/Max azioni** | Definisce il range selezionabile |
-    | **Numero titoli** | Seleziona esattamente N titoli migliori |
-    | **Usa Kelly** | Se disattivato, investe tutto il budget |
-    | **Propensione al Rischio** | 1-30% conservativo, 31-70% bilanciato, 71-100% aggressivo |
+    | **Peso massimo per singolo titolo** | Limita l'esposizione a un singolo titolo (es. 25% max) |
+    | **Peso massimo per settore** | Evita concentrazione in un solo settore (es. 60% max tech) |
+    
+    ### Perché sono importanti?
+    
+    - **Diversificazione:** Riduce il rischio "tutte le uova in un paniere"
+    - **Protezione:** Se un titolo o settore crolla, non perdi tutto
+    - **Regole istituzionali:** Molti fondi hanno questi limiti per obbligo di mandato
     """)
